@@ -12,7 +12,12 @@ To use NL-SQL Query Tool, follow these steps:
     - On macOS and Linux: `source env/bin/activate`
 4. Install the required packages using `pip install -r requirements.txt`.
 5. Obtain your Google Gemini API key. You can get it from [Gemini Developer Console](https://console.developers.google.com/).
-6. Configure your database connection by updating the `app.py` file:
+6. Create a `.env` file in the root directory of the project.
+7. Add your API keys to the `.env` file in the following format:
+    ```
+    GEMINI_API_KEY=your_gemini_api_key_here
+    ```
+8. Configure your database connection by updating the `app.py` file:
     - Replace the database name, host, username, and password in the connection parameters according to your setup.
 
 ## Usage
