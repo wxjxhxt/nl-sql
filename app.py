@@ -1,17 +1,24 @@
 #undergrads
 import speech_recognition as sr     
 import streamlit as st              
-# import os                           
+import os                           
 import google.generativeai as genai         
 # import assemblyai as aai                   
 import pymysql                      
 from googletrans import Translator   
 import pandas as pd
 import matplotlib.pyplot as plt
+import distutils
+import seaborn as sns
 from io import BytesIO
 import xlsxwriter
 import base64
 import numpy as np
+from reportlab.lib.pagesizes import letter
+import tempfile
+from reportlab.pdfgen import canvas
+from io import BytesIO
+from PIL import Image
 from dotenv import load_dotenv
 load_dotenv()                    
 
@@ -108,6 +115,7 @@ conn = pymysql.connect(host='localhost',
                        db='text_to_sql',
                        charset='utf8mb4',
                        cursorclass=pymysql.cursors.DictCursor)
+
 def read_sql_query(sql, table_name):
     try:
         # Connect to the MySQL database
@@ -125,13 +133,13 @@ def read_sql_query(sql, table_name):
         rows = cur.fetchall()
         
         conn.commit()
-        conn.close()
         
-        return rows, cur  # Return the fetched rows
+        # Return both the fetched rows and the cursor
+        return rows, cur  
     except pymysql.Error as e:
         st.write("Error connecting:", e)
-        return None
-
+        return None, None
+    
 def query_results_to_dataframe(results, cur):
     if results is not None and cur is not None:  # Check if both results and cur are not None
         column_names = [col[0] for col in cur.description]
@@ -141,8 +149,59 @@ def query_results_to_dataframe(results, cur):
         return None
 
 
+def generate_pdf_report(gemini_response, query_results_df, graph_figure):
+    buffer = BytesIO()
+    c = canvas.Canvas(buffer, pagesize=letter)
+    
+    # Title
+    c.setFont("Helvetica", 16)
+    c.drawString(100, 750, "Gemini Response Report")
+    
+    # Gemini Response
+    c.setFont("Helvetica", 12)
+    # c.drawString(100, 700, "Gemini Response:")
+    # if hasattr(gemini_response, 'text'):  # Check if gemini_response has a 'text' attribute
+    #     gemini_response_str = gemini_response.text
+    # else:
+    #     gemini_response_str = str(gemini_response)
+    # c.drawString(120, 680, gemini_response_str)
+    
+    # Query Results
+    c.drawString(100, 650, "Query Results:")
+    if query_results_df is not None:
+        # Convert DataFrame to string and draw it on the PDF
+        query_results_str = query_results_df.to_string(index=False)
+        lines = query_results_str.split('\n')
+        y_position = 630
+        for line in lines:
+            c.drawString(120, y_position, line)
+            y_position -= 20
+    
+    # Graph
+    c.drawString(100, 400, "Graph:")
+    if graph_figure is not None:
+        # Save the figure to a temporary file
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
+            graph_figure.savefig(tmp_file.name, format='png')
+            tmp_file.close()
+            # Draw the image from the temporary file
+            c.drawImage(tmp_file.name, 100, 250, width=400, height=300)
+            # Delete the temporary file after drawing the image
+            os.unlink(tmp_file.name)
+    
+    c.save()
+    buffer.seek(0)
+    
+    return buffer
+
+
+def download_pdf_report(gemini_response, query_results_df, graph_figure):
+    buffer = generate_pdf_report(gemini_response, query_results_df, graph_figure)
+    return buffer
+    
 def detect_language():
     r = sr.Recognizer()
+    audio = None  # Initialize audio with None
     with sr.Microphone() as source:
         print("Listening...")
         st.write("Listening...")
@@ -151,7 +210,11 @@ def detect_language():
             # Process the audio here
         except sr.WaitTimeoutError:
             print("Listening timed out.")
-    
+
+    # Check if audio is still None
+    if audio is None:
+        return "Unable to detect language"
+
     try:
         detected_language = r.recognize_google(audio)  # Let Google API detect the language
         return detected_language
@@ -191,10 +254,6 @@ def translate_to_english(text):
 #         st.write("Language detection failed")
 
 def main():
-    cur = conn.cursor()  # Assuming 'conn' is your database connection object
-    cur.execute(sql_query)
-    response = cur.fetchall()
-    
     detected_language = detect_language()
     if detected_language != "Unable to detect language":
         print("Detected Language:", detected_language)
@@ -215,18 +274,21 @@ def main():
                     st.write("Invalid query.")
                     return
                 response = read_sql_query(response, table_name)
+                
                 if response is not None:
                     st.subheader("The Response is")
                     df = query_results_to_dataframe(response, cur)  # Update columns accordingly
                     if df is not None:
                         st.write(df)
-                        fig = plot_bar_chart(df)
+                        fig = plot_chart(df)
 
                         # Display the plot in Streamlit
                         if fig is not None:
                             st.pyplot(fig)
+                            
                         else:
-                            st.write("No plot to display.")    
+                            st.write("No plot to display.")
+                        download_report(response, df, fig)        
                     else:
                         st.write("No data found for the query.")
                 else:
@@ -243,7 +305,7 @@ def main():
     #     # Display a download link
     #     st.markdown(f'Download your file [here]({csv_link})')
 
-def plot_bar_chart(df):
+def plot_chart(df):
     if df.empty:
         st.write("Insufficient data for plotting.")
         return None
@@ -253,14 +315,38 @@ def plot_bar_chart(df):
     y_col = df.columns[1]  # Column for y-axis
 
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.bar(df[x_col], df[y_col])
+
+    # Determine the appropriate plot type based on the data
+    if df[y_col].dtype == 'object':
+        # If y-axis data is categorical, plot a bar chart
+        ax.bar(df[x_col], df[y_col])
+        ax.set_title('Bar Chart')
+    elif len(df[y_col].unique()) < 10:
+        # If y-axis data is numerical with less than 10 unique values, plot a bar chart
+        ax.bar(df[x_col], df[y_col])
+        ax.set_title('Bar Chart')
+    elif df[y_col].dtype in ['int64', 'float64']:
+        # If y-axis data is numerical, plot a line chart
+        ax.plot(df[x_col], df[y_col])
+        ax.set_title('Line Chart')
+    else:
+        st.write("Unable to determine plot type for the provided data.")
+        return None
+
     ax.set_xlabel(x_col)
     ax.set_ylabel(y_col)
-    ax.set_title('Bar Chart')
     ax.tick_params(axis='x', rotation=45)  # Rotate x-axis labels for better visibility
 
     return fig
 
+def download_report(gemini_response, query_results_df, graph_figure):
+    pdf_buffer = download_pdf_report(gemini_response, query_results_df, graph_figure)
+    st.download_button(
+        label="Download Report",
+        data=pdf_buffer,
+        file_name="Query_report.pdf",
+        mime="application/pdf"
+    )
 # def download_csv(dataframe, filename):
 #     # Convert DataFrame to CSV string
 #     csv_string = dataframe.to_csv(index=False)
@@ -276,6 +362,14 @@ def plot_bar_chart(df):
 if __name__ == "__main__":
     submit = st.button("MIC")
     if submit:
+        conn = pymysql.connect(host='localhost',
+                               user='root',
+                               password='',  # Replace with your MySQL password
+                               db='text_to_sql',
+                               charset='utf8mb4',
+                               cursorclass=pymysql.cursors.DictCursor)
+
+        cur = conn.cursor()
         main()
     else:
         question = st.text_input("Input: ", key="input")  # string for input for API
@@ -295,14 +389,16 @@ if __name__ == "__main__":
                 raise ValueError("Invalid query.")  # Raise an error for an invalid query
             response, cur = read_sql_query(response, table_name)  # Pass table name as argument
             st.subheader("The Response is")
-            df = query_results_to_dataframe(response, cur)  # Update columns accordingly
+            df = query_results_to_dataframe(response, cur)
+               # Update columns accordingly
             if df is not None:
                 st.write(df)
-                fig = plot_bar_chart(df)
+                fig = plot_chart(df)
                 if fig is not None:
                     st.pyplot(fig)
                 else:
                     st.write("No plot to display.")
+                download_report(response, df, fig)    
             else:
                 st.write("No data found for the query.")
     # df = pd.DataFrame(response,fig)        
